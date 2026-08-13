@@ -1,4 +1,4 @@
-"""Create deterministic, redistribution-safe demo inputs for Neural Canvas."""
+"""Create redistribution-safe synthetic demo inputs for Neural Canvas."""
 
 import math
 import random
@@ -16,9 +16,7 @@ def _gradient(top: tuple[int, int, int], bottom: tuple[int, int, int]) -> Image.
     pixels = image.load()
     for y in range(HEIGHT):
         ratio = y / (HEIGHT - 1)
-        color = tuple(
-            round(a * (1 - ratio) + b * ratio) for a, b in zip(top, bottom, strict=True)
-        )
+        color = tuple(round(a * (1 - ratio) + b * ratio) for a, b in zip(top, bottom, strict=True))
         for x in range(WIDTH):
             pixels[x, y] = color
     return image
@@ -109,9 +107,7 @@ def create_style_image(seed: int = 7) -> Image.Image:
         draw.line((x, y, x + length, y + random.randint(-8, 8)), fill=color, width=2)
 
     texture = (
-        Image.effect_noise((WIDTH, HEIGHT), 28)
-        .convert("L")
-        .filter(ImageFilter.GaussianBlur(0.5))
+        Image.effect_noise((WIDTH, HEIGHT), 28).convert("L").filter(ImageFilter.GaussianBlur(0.5))
     )
     texture_color = Image.new("RGB", (WIDTH, HEIGHT), (91, 70, 56))
     image = Image.composite(texture_color, image, texture.point(lambda value: value // 8))
