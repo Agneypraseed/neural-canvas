@@ -1,11 +1,36 @@
 """Interactive Gradio demo for Neural Canvas."""
 
 # The embedded CSS and HTML are intentionally kept readable in their rendered form.
-# ruff: noqa: E501
+# ruff: noqa: E402, E501
 
+import logging
+import math
 from functools import lru_cache
 from html import escape
+from pathlib import Path
 from time import perf_counter
+from typing import Any
+
+try:
+    import spaces
+except ImportError:
+    _SPACES_RUNTIME = False
+
+    def _gpu_task(*, duration: int):
+        """Provide an effect-free local stand-in for ``spaces.GPU``."""
+
+        del duration
+
+        def decorator(function):
+            return function
+
+        return decorator
+
+else:
+    _SPACES_RUNTIME = True
+    _gpu_task = spaces.GPU
+
+HOSTED_DEVICE = "cuda" if _SPACES_RUNTIME else "auto"
 
 import gradio as gr
 from PIL import Image
@@ -13,12 +38,35 @@ from PIL import Image
 from neural_style_transfer.config import StyleTransferConfig
 from neural_style_transfer.engine import LossSnapshot, resolve_device, run_style_transfer
 from neural_style_transfer.image_io import (
+    DEFAULT_MAX_SOURCE_PIXELS,
+    ImageValidationError,
+    load_pil_image,
     pil_to_tensor,
     preserve_content_colors,
     resize_long_edge,
     tensor_to_pil,
+    validate_image_dimensions,
 )
 from neural_style_transfer.model import VGG19FeatureExtractor
+
+LOGGER = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).resolve().parent
+EXAMPLES_DIR = BASE_DIR / "examples"
+
+PUBLIC_MIN_STEPS = 25
+PUBLIC_DEFAULT_STEPS = 25
+PUBLIC_MAX_STEPS = 100
+PUBLIC_MIN_IMAGE_SIZE = 128
+PUBLIC_DEFAULT_IMAGE_SIZE = 128
+PUBLIC_MAX_IMAGE_SIZE = 256
+PUBLIC_MIN_STYLE_EXPONENT = 4.0
+PUBLIC_DEFAULT_STYLE_EXPONENT = 5.0
+PUBLIC_MAX_STYLE_EXPONENT = 6.0
+PUBLIC_MAX_SOURCE_PIXELS = DEFAULT_MAX_SOURCE_PIXELS
+PUBLIC_MAX_FILE_SIZE = "10mb"
+PUBLIC_QUEUE_SIZE = 8
+PUBLIC_GPU_DURATION_SECONDS = 60
+CACHE_CLEANUP_SECONDS = 3600
 
 APP_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
@@ -242,12 +290,50 @@ footer { display: none !important; }
 }
 """
 
+LAUNCH_KWARGS: dict[str, Any] = {
+    "theme": gr.themes.Base(),
+    "css": APP_CSS,
+    "max_file_size": PUBLIC_MAX_FILE_SIZE,
+    "max_threads": 4,
+    "show_error": False,
+    "enable_monitoring": False,
+    "state_session_capacity": 100,
+}
 
-@lru_cache(maxsize=3)
-def _feature_extractor(device_name: str) -> VGG19FeatureExtractor:
+
+def _new_feature_extractor(device_name: str) -> VGG19FeatureExtractor:
     config = StyleTransferConfig(device=device_name)
     layers = {config.content_layer, *(name for name, _ in config.style_layers)}
     return VGG19FeatureExtractor(layers).to(resolve_device(device_name)).eval()
+
+
+@lru_cache(maxsize=3)
+def _local_feature_extractor(device_name: str) -> VGG19FeatureExtractor:
+    """Load lazily for local CPU/CUDA/MPS workflows."""
+
+    return _new_feature_extractor(device_name)
+
+
+_HOSTED_FEATURE_EXTRACTOR: VGG19FeatureExtractor | None = None
+_HOSTED_FEATURE_ERROR: Exception | None = None
+if _SPACES_RUNTIME:
+    try:
+        # ZeroGPU's CUDA emulation registers module-scope model placement so the
+        # platform can transfer it efficiently when the decorated callback runs.
+        _HOSTED_FEATURE_EXTRACTOR = _new_feature_extractor(HOSTED_DEVICE)
+    except (OSError, RuntimeError) as exc:
+        _HOSTED_FEATURE_ERROR = exc
+        LOGGER.exception("Hosted VGG-19 initialization failed during startup")
+
+
+def _feature_extractor(device_name: str) -> VGG19FeatureExtractor:
+    if _SPACES_RUNTIME:
+        if _HOSTED_FEATURE_EXTRACTOR is not None:
+            return _HOSTED_FEATURE_EXTRACTOR
+        raise RuntimeError(
+            "hosted VGG-19 initialization did not complete"
+        ) from _HOSTED_FEATURE_ERROR
+    return _local_feature_extractor(device_name)
 
 
 def _summary_html(
@@ -255,9 +341,10 @@ def _summary_html(
     final: LossSnapshot,
     elapsed: float,
     steps: int,
-    image_size: int,
+    output_size: tuple[int, int],
 ) -> str:
     safe_device = escape(result_device.upper())
+    width, height = output_size
     return f"""
     <div class="summary-top">
       <span class="summary-title">Render complete</span>
@@ -266,65 +353,157 @@ def _summary_html(
     <div class="metrics">
       <div class="metric"><span class="metric-label">Device</span><span class="metric-value">{safe_device}</span></div>
       <div class="metric"><span class="metric-label">Steps</span><span class="metric-value">{steps:,}</span></div>
-      <div class="metric"><span class="metric-label">Edge</span><span class="metric-value">{image_size}px</span></div>
+      <div class="metric"><span class="metric-label">Output</span><span class="metric-value">{width}&times;{height}px</span></div>
       <div class="metric"><span class="metric-label">Total loss</span><span class="metric-value">{final.total:.5f}</span></div>
     </div>
     <p class="summary-foot">Content {final.content:.5f} &nbsp;·&nbsp; Style {final.style:.5f} &nbsp;·&nbsp; TV {final.total_variation:.5f}<br>Pixels were optimized against frozen VGG-19 features; model weights stayed unchanged.</p>
     """
 
 
+def _bounded_integer(value: object, *, name: str, minimum: int, maximum: int) -> int:
+    """Validate an integer supplied by an untrusted browser or API client."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not math.isfinite(number) or not number.is_integer():
+        raise ValueError(f"{name} must be a finite integer")
+    parsed = int(number)
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _bounded_float(value: object, *, name: str, minimum: float, maximum: float) -> float:
+    """Validate a finite float supplied by an untrusted browser or API client."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{name} must be finite")
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be between {minimum:g} and {maximum:g}")
+    return parsed
+
+
+def _prepare_public_image(path: str | Path | None, *, name: str, image_size: int) -> Image.Image:
+    if path is None:
+        raise ImageValidationError(f"add a {name} image to start a render")
+    image = load_pil_image(path, max_source_pixels=PUBLIC_MAX_SOURCE_PIXELS)
+    resized = resize_long_edge(image, image_size)
+    validate_image_dimensions(
+        resized,
+        max_source_pixels=PUBLIC_MAX_SOURCE_PIXELS,
+    )
+    return resized
+
+
+@_gpu_task(duration=PUBLIC_GPU_DURATION_SECONDS)
 def stylize(
-    content_image: Image.Image | None,
-    style_image: Image.Image | None,
-    steps: int,
-    image_size: int,
-    style_exponent: float,
+    content_path: str | Path | None,
+    style_path: str | Path | None,
+    steps: object,
+    image_size: object,
+    style_exponent: object,
     preserve_color: bool,
     progress: gr.Progress | None = None,
 ) -> tuple[Image.Image, str]:
     """Run a style-transfer render and return the image plus run metadata."""
 
-    if content_image is None or style_image is None:
+    if content_path is None or style_path is None:
         raise gr.Error("Add both a content image and a style reference to start a render.")
 
     started_at = perf_counter()
     progress = progress or gr.Progress()
-    config = StyleTransferConfig(
-        image_size=int(image_size),
-        steps=int(steps),
-        style_weight=10 ** float(style_exponent),
-        progress_interval=max(1, int(steps) // 50),
-    )
-    resized_content = resize_long_edge(content_image, config.image_size)
-    resized_style = resize_long_edge(style_image, config.image_size)
+    try:
+        safe_steps = _bounded_integer(
+            steps,
+            name="optimization steps",
+            minimum=PUBLIC_MIN_STEPS,
+            maximum=PUBLIC_MAX_STEPS,
+        )
+        safe_size = _bounded_integer(
+            image_size,
+            name="maximum image edge",
+            minimum=PUBLIC_MIN_IMAGE_SIZE,
+            maximum=PUBLIC_MAX_IMAGE_SIZE,
+        )
+        safe_style_exponent = _bounded_float(
+            style_exponent,
+            name="style intensity",
+            minimum=PUBLIC_MIN_STYLE_EXPONENT,
+            maximum=PUBLIC_MAX_STYLE_EXPONENT,
+        )
+        if not isinstance(preserve_color, bool):
+            raise ValueError("preserve colors must be true or false")
 
-    def update_progress(snapshot: LossSnapshot, _image: object) -> None:
-        progress(
-            (snapshot.step, config.steps),
-            desc=f"Optimizing pixels · step {snapshot.step}/{config.steps}",
+        progress(0, desc="Validating and preparing images")
+        resized_content = _prepare_public_image(
+            content_path,
+            name="content",
+            image_size=safe_size,
+        )
+        resized_style = _prepare_public_image(
+            style_path,
+            name="style reference",
+            image_size=safe_size,
+        )
+        config = StyleTransferConfig(
+            image_size=safe_size,
+            steps=safe_steps,
+            style_weight=10**safe_style_exponent,
+            progress_interval=max(1, safe_steps // 50),
+            device=HOSTED_DEVICE,
         )
 
-    extractor = _feature_extractor(config.device)
-    result = run_style_transfer(
-        pil_to_tensor(resized_content),
-        pil_to_tensor(resized_style),
-        config,
-        feature_extractor=extractor,
-        callback=update_progress,
-    )
-    output = tensor_to_pil(result.image)
-    if preserve_color:
-        output = preserve_content_colors(output, resized_content)
+        def update_progress(snapshot: LossSnapshot, _image: object) -> None:
+            progress(
+                (snapshot.step, config.steps),
+                desc=f"Optimizing pixels · step {snapshot.step}/{config.steps}",
+            )
 
-    final = result.history[-1]
-    summary = _summary_html(
-        result.device,
-        final,
-        perf_counter() - started_at,
-        config.steps,
-        config.image_size,
-    )
-    return output, summary
+        progress(0, desc="Loading frozen VGG-19 features")
+        try:
+            extractor = _feature_extractor(config.device)
+        except (OSError, RuntimeError) as exc:
+            LOGGER.exception("VGG-19 initialization failed")
+            raise RuntimeError(
+                "VGG-19 weights could not be loaded. The service may be temporarily unable "
+                "to reach the model host. Please try again after the service restarts."
+            ) from exc
+
+        result = run_style_transfer(
+            pil_to_tensor(resized_content),
+            pil_to_tensor(resized_style),
+            config,
+            feature_extractor=extractor,
+            callback=update_progress,
+        )
+        output = tensor_to_pil(result.image)
+        if preserve_color:
+            output = preserve_content_colors(output, resized_content)
+
+        final = result.history[-1]
+        summary = _summary_html(
+            result.device,
+            final,
+            perf_counter() - started_at,
+            config.steps,
+            output.size,
+        )
+        return output, summary
+    except gr.Error:
+        raise
+    except (ImageValidationError, MemoryError, OSError, RuntimeError, ValueError) as exc:
+        LOGGER.exception("Style-transfer request failed")
+        raise gr.Error(str(exc), print_exception=False) from exc
 
 
 def _empty_summary() -> str:
@@ -335,7 +514,11 @@ def _reset_workspace() -> tuple[None, None, None, str]:
     return None, None, None, _empty_summary()
 
 
-with gr.Blocks(title="Neural Canvas · Neural style transfer", fill_width=True) as demo:
+with gr.Blocks(
+    title="Neural Canvas · Neural style transfer",
+    fill_width=True,
+    delete_cache=(CACHE_CLEANUP_SECONDS, CACHE_CLEANUP_SECONDS),
+) as demo:
     gr.HTML(
         """
         <header id="site-header">
@@ -378,8 +561,10 @@ with gr.Blocks(title="Neural Canvas · Neural style transfer", fill_width=True) 
                 with gr.Column():
                     gr.HTML('<p class="image-label"><span>01</span>Content image</p>')
                     content_input = gr.Image(
-                        type="pil",
-                        sources=["upload", "clipboard"],
+                        type="filepath",
+                        sources=["upload"],
+                        format=None,
+                        image_mode=None,
                         show_label=False,
                         buttons=[],
                         height=211,
@@ -389,17 +574,26 @@ with gr.Blocks(title="Neural Canvas · Neural style transfer", fill_width=True) 
                 with gr.Column():
                     gr.HTML('<p class="image-label"><span>02</span>Style reference</p>')
                     style_input = gr.Image(
-                        type="pil",
-                        sources=["upload", "clipboard"],
+                        type="filepath",
+                        sources=["upload"],
+                        format=None,
+                        image_mode=None,
                         show_label=False,
                         buttons=[],
                         height=211,
                         elem_classes=["upload-box"],
                     )
-                    gr.HTML('<p class="image-help">The colors, texture, and visual rhythm to borrow.</p>')
+                    gr.HTML(
+                        '<p class="image-help">The colors, texture, and visual rhythm to borrow.</p>'
+                    )
 
             gr.Examples(
-                examples=[["examples/content.png", "examples/style.png"]],
+                examples=[
+                    [
+                        str(EXAMPLES_DIR / "content.png"),
+                        str(EXAMPLES_DIR / "style.png"),
+                    ]
+                ],
                 inputs=[content_input, style_input],
                 label="Try the included showcase pair",
                 elem_id="examples-wrap",
@@ -410,25 +604,25 @@ with gr.Blocks(title="Neural Canvas · Neural style transfer", fill_width=True) 
                 gr.HTML('<div class="section-kicker">02 / Recipe</div>')
                 with gr.Row():
                     steps_input = gr.Slider(
-                        50,
-                        600,
-                        value=250,
+                        PUBLIC_MIN_STEPS,
+                        PUBLIC_MAX_STEPS,
+                        value=PUBLIC_DEFAULT_STEPS,
                         step=25,
                         label="Optimization steps",
                         info="More steps = finer convergence",
                     )
                     size_input = gr.Slider(
-                        128,
-                        768,
-                        value=384,
+                        PUBLIC_MIN_IMAGE_SIZE,
+                        PUBLIC_MAX_IMAGE_SIZE,
+                        value=PUBLIC_DEFAULT_IMAGE_SIZE,
                         step=64,
                         label="Maximum image edge",
-                        info="384px is a good demo default",
+                        info="128px is the measured fast-demo default",
                     )
                 strength_input = gr.Slider(
-                    4.0,
-                    6.5,
-                    value=5.0,
+                    PUBLIC_MIN_STYLE_EXPONENT,
+                    PUBLIC_MAX_STYLE_EXPONENT,
+                    value=PUBLIC_DEFAULT_STYLE_EXPONENT,
                     step=0.1,
                     label="Style intensity",
                     info="How strongly the reference influences the result",
@@ -440,9 +634,13 @@ with gr.Blocks(title="Neural Canvas · Neural style transfer", fill_width=True) 
                 )
 
             with gr.Row(elem_classes=["action-row"]):
-                run_button = gr.Button("Create stylized image  →", variant="primary", elem_id="run-button")
+                run_button = gr.Button(
+                    "Create stylized image  →", variant="primary", elem_id="run-button"
+                )
                 clear_button = gr.Button("Reset", variant="secondary", elem_id="clear-button")
-            gr.HTML('<p class="run-hint">The first run may download VGG-19 weights. CPU renders are intentionally small enough to run locally.</p>')
+            gr.HTML(
+                '<p class="run-hint">The first run may download VGG-19 weights. CPU renders are intentionally small enough to run locally.</p>'
+            )
 
         with gr.Column(scale=7, elem_id="result-panel"):
             gr.HTML(
@@ -489,13 +687,27 @@ with gr.Blocks(title="Neural Canvas · Neural style transfer", fill_width=True) 
             preserve_input,
         ],
         outputs=[output_image, run_summary],
+        api_name=False,
+        api_visibility="private",
+        concurrency_limit=1,
+        concurrency_id="style-transfer",
     )
 
     clear_button.click(
         fn=_reset_workspace,
         outputs=[content_input, style_input, output_image, run_summary],
+        api_name=False,
+        api_visibility="private",
+        queue=False,
     )
 
 
+demo.queue(
+    api_open=False,
+    max_size=PUBLIC_QUEUE_SIZE,
+    default_concurrency_limit=1,
+)
+
+
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=1).launch(theme=gr.themes.Base(), css=APP_CSS)
+    demo.launch(**LAUNCH_KWARGS)
