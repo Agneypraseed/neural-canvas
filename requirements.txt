@@ -1,1 +1,5 @@
--e .[demo]
+# Hugging Face Space runtime dependencies. Gradio and `spaces` are supplied by
+# the Gradio SDK/ZeroGPU runtime configured in the README metadata.
+-e .
+torch==2.11.0
+torchvision==0.26.0
