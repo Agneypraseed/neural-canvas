@@ -11,6 +11,23 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import gradio as gr
+from PIL import Image
+
+from neural_style_transfer.config import StyleTransferConfig
+from neural_style_transfer.engine import LossSnapshot, resolve_device, run_style_transfer
+from neural_style_transfer.image_io import (
+    DEFAULT_MAX_SOURCE_PIXELS,
+    ImageValidationError,
+    load_pil_image,
+    pil_to_tensor,
+    preserve_content_colors,
+    resize_long_edge,
+    tensor_to_pil,
+    validate_image_dimensions,
+)
+from neural_style_transfer.model import VGG19FeatureExtractor
+
 try:
     import spaces
 except ImportError:
@@ -32,22 +49,6 @@ else:
 
 HOSTED_DEVICE = "cuda" if _SPACES_RUNTIME else "auto"
 
-import gradio as gr
-from PIL import Image
-
-from neural_style_transfer.config import StyleTransferConfig
-from neural_style_transfer.engine import LossSnapshot, resolve_device, run_style_transfer
-from neural_style_transfer.image_io import (
-    DEFAULT_MAX_SOURCE_PIXELS,
-    ImageValidationError,
-    load_pil_image,
-    pil_to_tensor,
-    preserve_content_colors,
-    resize_long_edge,
-    tensor_to_pil,
-    validate_image_dimensions,
-)
-from neural_style_transfer.model import VGG19FeatureExtractor
 
 LOGGER = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
@@ -256,6 +257,31 @@ footer { display: none !important; }
 .output-placeholder .placeholder-icon { color: var(--orange); font-size: 34px; margin-bottom: 10px; }
 .output-placeholder p { font-size: 13px; margin: 0; }
 .output-placeholder small { color: #aaa39a; font-size: 11px; margin-top: 6px; }
+
+/* Keep Gradio's live progress copy aligned with its meter instead of letting
+   the step/time metadata float over the result summary. */
+[data-testid='status-tracker'] .progress-text {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto;
+  width: min(100%, 430px);
+}
+[data-testid='status-tracker'] .progress-level,
+[data-testid='status-tracker'] .progress-level-inner,
+[data-testid='status-tracker'] .progress-bar-wrap { width: 100%; }
+[data-testid='status-tracker'] .progress-level-inner { margin: 0 auto 3px; text-align: center; }
+[data-testid='status-tracker'] .progress-bar-wrap { box-sizing: border-box; }
+[data-testid='status-tracker'] .meta-text {
+  align-self: center;
+  bottom: auto;
+  margin-top: 4px;
+  padding: 0;
+  position: static;
+  right: auto;
+  text-align: center;
+  transform: none;
+}
 
 .run-summary { margin-top: 15px; }
 .run-summary.empty { background: #f5f2ed; border: 1px solid #e6e0d8; border-radius: 11px; color: var(--muted); font-size: 12px; padding: 13px 15px; }
@@ -532,9 +558,8 @@ with gr.Blocks(
         with gr.Column(scale=7):
             gr.HTML(
                 """
-                <div class="hero-kicker">A small computer-vision lab</div>
-                <h1 class="hero-title">Make an image feel<br><em>like somewhere else.</em></h1>
-                <p class="hero-copy">Neural Canvas separates the structure of one image from the visual language of another—then optimizes a new image, one pixel at a time.</p>
+                <div class="hero-kicker">Neural style transfer with VGG-19</div>
+                <p class="hero-copy">Given two images. It holds the composition of one, borrows the visual statistics of the other, and optimizes the result one pixel at a time.</p>
                 """
             )
         with gr.Column(scale=3):
@@ -552,8 +577,7 @@ with gr.Blocks(
             gr.HTML(
                 """
                 <div class="section-heading">
-                  <div><div class="section-kicker">01 / Inputs</div><div class="section-title">Set the visual brief</div></div>
-                  <div class="section-note">two images · one result</div>
+                  <div class="section-kicker">Inputs</div>
                 </div>
                 """
             )
@@ -601,7 +625,6 @@ with gr.Blocks(
             )
 
             with gr.Column(elem_classes=["controls"]):
-                gr.HTML('<div class="section-kicker">02 / Recipe</div>')
                 with gr.Row():
                     steps_input = gr.Slider(
                         PUBLIC_MIN_STEPS,
@@ -646,7 +669,7 @@ with gr.Blocks(
             gr.HTML(
                 """
                 <div class="output-head">
-                  <div><div class="section-kicker">03 / Output</div><div class="section-title">Your new visual system</div></div>
+                  <div><div class="section-kicker">Output</div></div>
                   <div class="live-pill"><span class="live-dot"></span> ready to render</div>
                 </div>
                 """
@@ -665,7 +688,6 @@ with gr.Blocks(
         """
         <section id="method">
           <div class="section-kicker">The method</div>
-          <div class="method-title">A transparent pipeline, not a magic button.</div>
           <div class="method-grid">
             <article class="method-card"><div class="method-number">01 / EXTRACT</div><h3>Read visual structure</h3><p>A frozen ImageNet VGG-19 encodes content activations and style statistics at multiple depths.</p></article>
             <article class="method-card"><div class="method-number">02 / OPTIMIZE</div><h3>Move the pixels</h3><p>Adam minimizes content, normalized Gram-matrix style, and total-variation losses together.</p></article>
