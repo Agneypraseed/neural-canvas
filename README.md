@@ -13,13 +13,15 @@ short_description: Optimization-based neural style transfer with frozen VGG-19 f
 
 # Neural Canvas
 
+[![CI](https://github.com/Agneypraseed/neural-canvas/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Agneypraseed/neural-canvas/actions/workflows/ci.yml)
+
 **Optimization-based neural style transfer, rebuilt as a tested Python product.**
 
 Neural Canvas combines the spatial structure of a content image with the texture statistics of a style reference. It is an independent PyTorch implementation of the Gatys, Ecker, and Bethge method: ImageNet-pretrained VGG-19 stays frozen while Adam updates only the pixels of a generated image.
 
 The repository packages that baseline as more than a notebook: a reusable library, `nst` command-line interface, guarded Gradio application, Docker image, machine-readable benchmark, automated test suite, and GitHub Actions workflow.
 
-> **Publishing status:** the intended repository URL is [github.com/Agneypraseed/neural-canvas](https://github.com/Agneypraseed/neural-canvas). A public live demo has not been verified and is **pending deployment**.
+> **Publishing status:** the source repository is public at [github.com/Agneypraseed/neural-canvas](https://github.com/Agneypraseed/neural-canvas), and its `main` CI workflow is verified green. A public live demo has not been verified and is **pending deployment**.
 
 ## Result
 

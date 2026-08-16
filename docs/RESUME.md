@@ -19,7 +19,7 @@ Python, PyTorch, Torchvision, Pillow, NumPy, Gradio, Pytest, Ruff, setuptools, D
 
 ## Publication links
 
-**GitHub:** [github.com/Agneypraseed/neural-canvas](https://github.com/Agneypraseed/neural-canvas) - expected repository URL; publication and public accessibility are pending verification.
+**GitHub:** [github.com/Agneypraseed/neural-canvas](https://github.com/Agneypraseed/neural-canvas) - public repository with a verified green `main` CI workflow.
 
 **Live demo:** Pending permanent deployment and a successful public end-to-end smoke test. Do not add or claim a demo URL until that verification is complete.
 
