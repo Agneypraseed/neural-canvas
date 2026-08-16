@@ -93,7 +93,7 @@ def test_benchmark_emits_measured_json_without_downloading_weights(
     assert exit_code == 0
     report = json.loads(capsys.readouterr().out)
     assert report["schema"] == "neural-canvas-benchmark"
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert datetime.fromisoformat(report["timestamp"]).tzinfo is not None
     assert report["timezone"]["utc_offset"] is not None
     assert report["config"]["image_size"] == 32
@@ -129,7 +129,7 @@ def test_benchmark_emits_measured_json_without_downloading_weights(
     assert report["output"]["sha256"] == hashlib.sha256(output_path.read_bytes()).hexdigest()
     assert report["final_loss_snapshot"]["step"] == 2
     assert report["final_loss_snapshot"]["total"] == 4.0
-    assert "before the optimizer update" in report["final_loss_snapshot"]["semantics"]
+    assert "after the optimizer update and clamp" in report["final_loss_snapshot"]["semantics"]
 
 
 def test_benchmark_help(capsys: pytest.CaptureFixture[str]) -> None:

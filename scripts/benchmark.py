@@ -33,13 +33,13 @@ from neural_style_transfer.image_io import load_image, save_image  # noqa: E402
 from neural_style_transfer.model import VGG19FeatureExtractor  # noqa: E402
 
 SCHEMA_NAME = "neural-canvas-benchmark"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SUPPORTED_OUTPUT_SUFFIXES = frozenset({".jpeg", ".jpg", ".png", ".webp"})
 FINAL_LOSS_SEMANTICS = (
     "The total is the weighted objective; content, style, and total_variation are raw "
-    "unweighted components. The engine snapshot values were computed before the optimizer "
-    "update for the reported step; the saved image contains the pixels after that update "
-    "and clamp."
+    "unweighted components. The engine re-evaluated these values after the optimizer update "
+    "and clamp for the reported step, so they describe the returned result tensor and callback "
+    "image. The encoded output file may include normal 8-bit quantization."
 )
 
 

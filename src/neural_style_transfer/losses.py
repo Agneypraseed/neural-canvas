@@ -1,5 +1,6 @@
 """Differentiable losses used by neural style transfer."""
 
+import math
 from collections.abc import Mapping, Sequence
 
 import torch
@@ -37,9 +38,11 @@ def style_loss(
 
     reference = next(iter(generated_features.values()))
     loss = reference.new_zeros(())
+    if any(not math.isfinite(weight) or weight < 0 for _, weight in layer_weights):
+        raise ValueError("layer weights must be finite and non-negative")
     total_weight = sum(weight for _, weight in layer_weights)
-    if total_weight <= 0:
-        raise ValueError("layer weights must have a positive sum")
+    if not math.isfinite(total_weight) or total_weight <= 0:
+        raise ValueError("layer weights must have a finite, positive sum")
 
     for layer_name, weight in layer_weights:
         if layer_name not in generated_features or layer_name not in style_targets:
@@ -55,6 +58,15 @@ def total_variation_loss(image: Tensor) -> Tensor:
 
     if image.ndim != 4:
         raise ValueError("image must have shape (batch, channels, height, width)")
-    horizontal = torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1]).mean()
-    vertical = torch.abs(image[:, :, 1:, :] - image[:, :, :-1, :]).mean()
-    return horizontal + vertical
+    height, width = image.shape[-2:]
+    if height < 1 or width < 1:
+        raise ValueError("image spatial dimensions must be positive")
+
+    directional_losses: list[Tensor] = []
+    if width > 1:
+        directional_losses.append(torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1]).mean())
+    if height > 1:
+        directional_losses.append(torch.abs(image[:, :, 1:, :] - image[:, :, :-1, :]).mean())
+    if not directional_losses:
+        return image.sum() * 0.0
+    return torch.stack(directional_losses).sum()

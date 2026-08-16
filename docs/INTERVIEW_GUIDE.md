@@ -81,33 +81,33 @@ The mathematical pipeline is the same on every supported device. CPU requires no
 
 Memory and computation both grow with image area because VGG activations must be retained for backpropagation to the pixels. The Gradio app therefore limits image size and steps, serializes renders, and caches one frozen extractor per process/device. Target features are still computed for each new image pair. A seed is set, but bit-for-bit equality across CPU, CUDA, and MPS is not promised.
 
-## Current limitations and known issues
+## Correctness boundaries and method limitations
 
-These are interview-safe descriptions of the repository as it stands, not claims that the issues are already fixed. Any proposed change to configuration, losses, feature extraction, or the optimization loop requires the repository owner's explicit approval before implementation.
+The numerical boundaries below were audited explicitly. They are useful interview examples because each behavior is backed by a focused regression test rather than an assumption about the happy path.
 
 ### Iterative rather than real-time
 
 Every content/style pair requires many VGG forward/backward passes. This is inherently slower than a trained feed-forward network. The current project neither trains a transformation network nor claims real-time inference.
 
-### Loss snapshots use pre-update values
+### Loss snapshots describe post-update pixels
 
-The engine computes each reported loss, calls `backward()`, runs `optimizer.step()`, and clamps the pixels. It then stores the already-computed loss but supplies the post-update image to the callback and result. A snapshot labeled step `n` therefore describes the pixels immediately before update `n`, while the accompanying image is immediately after it. The benchmark records this semantic explicitly, but the states are not aligned. A core-engine change is awaiting owner approval. A fix should be proven with a one-step tiny-extractor test that recomputes loss from the returned/callback image and checks that the final snapshot and final pixels describe the same state.
+The loss used for backpropagation is necessarily computed before `optimizer.step()`. After the step and `[0,1]` clamp, the engine performs a no-gradient re-evaluation only when a progress snapshot is due. The stored losses therefore describe the same floating-point pixels supplied to the callback and final result. A one-step tiny-extractor regression independently recomputes every component from the returned tensor. The tradeoff is one extra forward pass per reporting step, not a change to the optimization itself.
 
-### Non-finite values are blocked at public boundaries, not throughout the core API
+### Non-finite values are blocked throughout the public and core APIs
 
-The Gradio server and CLI reject `NaN` and infinity for user-controlled numeric arguments. Direct construction of `StyleTransferConfig`, however, does not yet use an explicit finiteness check, and the core tensor API does not explicitly reject non-finite image values. Python comparisons with `NaN` can bypass ordinary range checks and lead to `NaN` losses. Closing that core gap affects configuration/engine behavior and requires approval. Tests should cover every floating configuration field plus non-finite content and style tensors.
+The Gradio server and CLI reject `NaN` and infinity for user-controlled arguments. `StyleTransferConfig` independently validates every floating objective value and style-layer weight, and the engine rejects non-finite content or style tensors before device transfer and optimization. Parameterized tests cover `NaN`, positive infinity, and negative infinity at both boundaries. Extremely large but finite values can still cause floating-point overflow during an optimization, so the public app also keeps conservative numeric caps.
 
-### The default VGG path has a 16-pixel spatial boundary
+### The VGG minimum follows the requested pooling depth
 
-File-based CLI and public-demo paths enforce a shortest edge of at least 16 pixels, including after resizing. The low-level engine currently accepts tensors as small as 2 by 2. That is useful for injected test extractors, but the default `relu5_1` path crosses four VGG pooling stages and needs at least 16 pixels on each edge; a 2-15 pixel direct input can pass engine validation and fail later inside VGG. A future validation should distinguish the default/deep VGG path from custom extractors. Boundary tests should prove clear rejection at 15 pixels and successful feature extraction at 16 pixels.
+The default `relu5_1` path crosses four VGG pooling stages and therefore needs at least 16 pixels on each edge. The extractor derives its minimum from the deepest requested layer and raises a descriptive error before convolution or pooling. Tests prove rejection at 15 pixels, success at 16 pixels, and continued one-pixel support for a shallow `relu1_1` extractor. The engine's generic two-pixel boundary remains useful for injected lightweight extractors in offline tests.
 
-### Style-layer weights need individual validation
+### Style-layer weights are validated twice
 
-`StyleTransferConfig` rejects negative layer weights, but the standalone public `style_loss` helper currently checks only that their sum is positive. A direct loss caller can therefore provide a negative weight for one layer as long as other positive weights keep the total above zero; that subtracts that layer's loss and changes the intended objective. A proposed loss-helper fix would require every layer weight to be finite and non-negative while keeping at least one strictly positive. Separate configuration tests should prove that `NaN` and infinity cannot bypass its validation. Loss tests should cover a negative member, `NaN`/infinite weights, an all-zero tuple, and the existing default tuple.
+`StyleTransferConfig` and the standalone public `style_loss` helper both require every member weight to be finite and non-negative, with a finite positive total. The helper keeps its own guard because it is independently callable. Tests cover a negative member hidden by a larger positive weight, `NaN`, both infinities, an all-zero tuple, and the existing valid path.
 
-### Total variation has a degenerate-dimension edge case
+### Total variation remains defined on singleton dimensions
 
-The standalone TV helper averages horizontal and vertical neighbor differences unconditionally. If a caller supplies a one-pixel height or width, one slice is empty and its mean becomes `NaN`. The normal default VGG workflow cannot reach this shape, but the public loss function should still be mathematically well-defined or reject it clearly. A proposed fix would sum only the neighbor directions that exist, with tests for `1xN`, `Nx1`, and `1x1` tensors plus an unchanged ordinary-image result.
+The standalone TV helper averages only neighbor directions that exist. A `1xN` tensor therefore uses horizontal differences, an `Nx1` tensor uses vertical differences, and `1x1` has a differentiable zero loss and zero gradient. Empty spatial dimensions are rejected. These shapes do not occur in the default VGG workflow, but the public loss helper remains mathematically well-defined for direct callers.
 
 ### A seed is not cross-device determinism
 
@@ -119,7 +119,7 @@ Gram matrices discard spatial arrangement, so they can transfer texture without 
 
 ## Reasonable future improvements
 
-Priorities are to align snapshot/image semantics after explicit approval, enforce non-finite checks in core configuration/tensors and per-layer checks in the public loss helper, define TV behavior for degenerate spatial dimensions, and make the VGG minimum-size error immediate and descriptive. After those correctness changes, useful experiments include coarse-to-fine optimization, an optional L-BFGS backend, carefully benchmarked mixed precision, per-device reproducibility reports, more accessible progress previews, and configurable feature layers. A feed-forward arbitrary-style model would be a separate trained system and should be described as future work, not as a capability of this repository.
+Useful experiments include coarse-to-fine optimization, an optional L-BFGS backend, carefully benchmarked mixed precision, per-device reproducibility reports, more accessible progress previews, and configurable feature layers. Each would need measurements and focused tests before changing the stable default path. A feed-forward arbitrary-style model would be a separate trained system and should be described as future work, not as a capability of this repository.
 
 ## Interview questions and concise answers
 
@@ -207,21 +207,21 @@ It validates type, format, dimensions, pixel count, finite controls, and server-
 
 VGG construction, weight loading, and device transfer are reusable across requests. Local Gradio execution caches one extractor per device; ZeroGPU initializes its hosted CUDA extractor at module scope for efficient allocation. Both still recompute content and style targets for each pair.
 
-### 22. What is the snapshot-semantics issue?
+### 22. How do you ensure a loss snapshot matches its image?
 
-Reported loss values are computed before an Adam update, while the callback image has already been updated and clamped. The mismatch is documented and awaits approval for a core-engine fix with state-alignment tests.
+After an Adam update and clamp, the engine performs a no-gradient re-evaluation at reporting steps. A one-step regression independently recomputes content, style, TV, and weighted total losses from the returned tensor and verifies both the snapshot and callback image.
 
 ### 23. Where can `NaN` still enter?
 
-The CLI and UI reject non-finite controls, but a caller using `StyleTransferConfig` and `run_style_transfer` directly can bypass those boundary checks. Explicit core finiteness validation remains to be added after approval.
+Configuration, style-layer weights, and input tensors reject non-finite values at the core boundary. Floating-point arithmetic can still overflow during optimization if a direct caller chooses extreme but finite values, which is why the public app also imposes conservative bounds and why loss monitoring remains useful.
 
 ### 24. Why is 16 pixels a meaningful boundary?
 
-The deepest default style layer follows four downsampling pools, so each spatial edge must start at 16 or more to remain valid. File workflows enforce this; direct core tensors currently receive only a 2-pixel check.
+The deepest default style layer follows four downsampling pools, so each spatial edge must start at 16 or more to remain valid. The extractor derives and enforces that threshold from the requested layers; shallower requests retain smaller valid boundaries.
 
 ### 25. What would you improve first?
 
-I would resolve the core validation/reporting gaps with targeted tests—snapshot alignment, finiteness, VGG size, style-layer weights, and degenerate TV—then benchmark coarse-to-fine optimization and L-BFGS before changing performance-sensitive behavior.
+I would benchmark coarse-to-fine optimization and an optional L-BFGS backend against the stable Adam baseline, then explore mixed precision only with device-specific numerical and image-quality evidence. I would keep each experiment opt-in until its tradeoffs are measured.
 
 ### 26. What is original about the project?
 

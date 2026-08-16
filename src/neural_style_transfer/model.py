@@ -32,7 +32,7 @@ class VGG19FeatureExtractor(nn.Module):
     def __init__(
         self,
         requested_layers: Iterable[str],
-        weights: VGG19_Weights = VGG19_Weights.DEFAULT,
+        weights: VGG19_Weights | None = VGG19_Weights.DEFAULT,
     ) -> None:
         super().__init__()
         requested = frozenset(requested_layers)
@@ -55,12 +55,12 @@ class VGG19FeatureExtractor(nn.Module):
         self.last_required_index = max(
             index for index, name in VGG_LAYER_NAMES.items() if name in requested
         )
-        self.register_buffer(
-            "mean", torch.tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1)
+        pooling_stages = sum(
+            isinstance(layer, nn.MaxPool2d) for layer in layers[: self.last_required_index + 1]
         )
-        self.register_buffer(
-            "std", torch.tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1)
-        )
+        self.minimum_input_size = 2**pooling_stages
+        self.register_buffer("mean", torch.tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1))
 
         for parameter in self.parameters():
             parameter.requires_grad_(False)
@@ -68,6 +68,14 @@ class VGG19FeatureExtractor(nn.Module):
     def forward(self, image: Tensor) -> dict[str, Tensor]:
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError("image must have shape (batch, 3, height, width)")
+        height, width = image.shape[-2:]
+        if min(height, width) < self.minimum_input_size:
+            requested = ", ".join(sorted(self.requested_layers))
+            raise ValueError(
+                "image short edge must be at least "
+                f"{self.minimum_input_size} pixels for requested VGG layers "
+                f"({requested}); got {height}x{width}"
+            )
 
         activation = (image - self.mean) / self.std
         outputs: dict[str, Tensor] = {}

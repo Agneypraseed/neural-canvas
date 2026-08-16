@@ -39,7 +39,7 @@ jobs:
         run: ruff check .
 
       - name: Check formatting
-        run: ruff format --check app.py examples/generate_demo_inputs.py scripts src/neural_style_transfer/cli.py src/neural_style_transfer/image_io.py tests/test_app.py tests/test_benchmark.py tests/test_cli.py tests/test_image_io.py
+        run: ruff format --check .
 
       - name: Test
         run: python -m pytest

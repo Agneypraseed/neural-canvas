@@ -1,5 +1,6 @@
 """Validated configuration for a neural-style-transfer run."""
 
+import math
 from dataclasses import dataclass
 
 DEFAULT_STYLE_LAYERS = (
@@ -33,6 +34,15 @@ class StyleTransferConfig:
             raise ValueError("image_size must be at least 32 pixels")
         if self.steps < 1:
             raise ValueError("steps must be at least 1")
+        finite_values = {
+            "learning_rate": self.learning_rate,
+            "content_weight": self.content_weight,
+            "style_weight": self.style_weight,
+            "total_variation_weight": self.total_variation_weight,
+        }
+        non_finite = [name for name, value in finite_values.items() if not math.isfinite(value)]
+        if non_finite:
+            raise ValueError(f"configuration values must be finite: {', '.join(non_finite)}")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
         if self.content_weight < 0 or self.style_weight < 0:
@@ -43,9 +53,13 @@ class StyleTransferConfig:
             raise ValueError("content_layer cannot be empty")
         if not self.style_layers:
             raise ValueError("at least one style layer is required")
-        if any(not name or weight < 0 for name, weight in self.style_layers):
-            raise ValueError("style layers need a name and a non-negative weight")
-        if sum(weight for _, weight in self.style_layers) <= 0:
+        if any(
+            not name or not math.isfinite(weight) or weight < 0
+            for name, weight in self.style_layers
+        ):
+            raise ValueError("style layers need a name and a finite, non-negative weight")
+        total_style_weight = sum(weight for _, weight in self.style_layers)
+        if not math.isfinite(total_style_weight) or total_style_weight <= 0:
             raise ValueError("style layer weights must have a positive sum")
         if self.initialization not in {"content", "noise"}:
             raise ValueError("initialization must be 'content' or 'noise'")

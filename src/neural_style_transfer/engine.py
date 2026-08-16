@@ -60,6 +60,8 @@ def _validate_image_tensor(image: Tensor, name: str) -> None:
         raise ValueError(f"{name} must have shape (1, 3, height, width)")
     if image.shape[2] < 2 or image.shape[3] < 2:
         raise ValueError(f"{name} must be at least 2 by 2 pixels")
+    if not torch.isfinite(image).all():
+        raise ValueError(f"{name} must contain only finite values")
 
 
 def _style_targets(
@@ -104,9 +106,7 @@ def run_style_transfer(
         content_target = content_features[config.content_layer].detach()
         style_targets = _style_targets(style_features, config.style_layers)
 
-    initial = (
-        content.clone() if config.initialization == "content" else torch.rand_like(content)
-    )
+    initial = content.clone() if config.initialization == "content" else torch.rand_like(content)
 
     generated = nn.Parameter(initial)
     optimizer = torch.optim.Adam([generated], lr=config.learning_rate)
@@ -119,9 +119,7 @@ def run_style_transfer(
         current_content_loss = content_loss(
             generated_features[config.content_layer], content_target
         )
-        current_style_loss = style_loss(
-            generated_features, style_targets, config.style_layers
-        )
+        current_style_loss = style_loss(generated_features, style_targets, config.style_layers)
         current_tv_loss = total_variation_loss(generated)
         total_loss = (
             config.content_weight * current_content_loss
@@ -134,16 +132,28 @@ def run_style_transfer(
         with torch.no_grad():
             generated.clamp_(0, 1)
 
-        should_report = (
-            step == 1 or step == config.steps or step % config.progress_interval == 0
-        )
+        should_report = step == 1 or step == config.steps or step % config.progress_interval == 0
         if should_report:
+            with torch.no_grad():
+                reported_features = extractor(generated)
+                reported_content_loss = content_loss(
+                    reported_features[config.content_layer], content_target
+                )
+                reported_style_loss = style_loss(
+                    reported_features, style_targets, config.style_layers
+                )
+                reported_tv_loss = total_variation_loss(generated)
+                reported_total_loss = (
+                    config.content_weight * reported_content_loss
+                    + config.style_weight * reported_style_loss
+                    + config.total_variation_weight * reported_tv_loss
+                )
             snapshot = LossSnapshot(
                 step=step,
-                total=float(total_loss.detach().cpu()),
-                content=float(current_content_loss.detach().cpu()),
-                style=float(current_style_loss.detach().cpu()),
-                total_variation=float(current_tv_loss.detach().cpu()),
+                total=float(reported_total_loss.cpu()),
+                content=float(reported_content_loss.cpu()),
+                style=float(reported_style_loss.cpu()),
+                total_variation=float(reported_tv_loss.cpu()),
             )
             history.append(snapshot)
             if callback is not None:

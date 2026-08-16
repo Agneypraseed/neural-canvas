@@ -22,3 +22,33 @@ def test_invalid_config_values(field: str, value: object) -> None:
 def test_default_style_weights_sum_to_one() -> None:
     config = StyleTransferConfig()
     assert sum(weight for _, weight in config.style_layers) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["learning_rate", "content_weight", "style_weight", "total_variation_weight"],
+)
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_config_rejects_non_finite_numeric_values(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        StyleTransferConfig(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "weight",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_config_rejects_non_finite_style_layer_weights(weight: float) -> None:
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        StyleTransferConfig(style_layers=(("style", weight),))
