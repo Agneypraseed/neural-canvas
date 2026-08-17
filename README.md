@@ -1,3 +1,15 @@
+---
+title: Neural Canvas
+emoji: 🎨
+colorFrom: yellow
+colorTo: blue
+sdk: gradio
+sdk_version: 6.22.0
+python_version: 3.12.12
+app_file: app.py
+pinned: false
+short_description: Optimization-based neural style transfer with frozen VGG-19 features.
+---
 
 # Neural Canvas
 

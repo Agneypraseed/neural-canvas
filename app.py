@@ -559,7 +559,7 @@ with gr.Blocks(
             gr.HTML(
                 """
                 <div class="hero-kicker">Neural style transfer with VGG-19</div>
-                <p class="hero-copy">Given two images. It holds the composition of one, borrows the visual statistics of the other, and optimizes the result one pixel at a time.</p>
+                <p class="hero-copy">Neural Canvas takes two images: it uses the composition of one and the visual statistics of the other, then optimizes the result one pixel at a time.</p>
                 """
             )
         with gr.Column(scale=3):
@@ -632,7 +632,7 @@ with gr.Blocks(
                         value=PUBLIC_DEFAULT_STEPS,
                         step=25,
                         label="Optimization steps",
-                        info="More steps = finer convergence",
+                        info="More steps allow more pixel updates",
                     )
                     size_input = gr.Slider(
                         PUBLIC_MIN_IMAGE_SIZE,
@@ -662,7 +662,7 @@ with gr.Blocks(
                 )
                 clear_button = gr.Button("Reset", variant="secondary", elem_id="clear-button")
             gr.HTML(
-                '<p class="run-hint">The first run may download VGG-19 weights. CPU renders are intentionally small enough to run locally.</p>'
+                '<p class="run-hint">The first run may download VGG-19 weights. The 128px default is sized for a practical local CPU run.</p>'
             )
 
         with gr.Column(scale=7, elem_id="result-panel"):
